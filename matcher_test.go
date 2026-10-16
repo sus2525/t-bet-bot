@@ -44,6 +44,21 @@ func TestResolveForecastNamesAndReasons(t *testing.T) {
 	}
 }
 
+func TestCommandResponseStaysInForumTopic(t *testing.T) {
+	var payload map[string]any
+	client := &http.Client{Transport: transportFunc(func(req *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{}}`)), Header: make(http.Header)}, nil
+	})}
+	bot := &Bot{token: "test", client: client}
+	bot.handle(Message{Chat: Chat{ID: -100123, Type: "supergroup"}, MessageID: 8, MessageThreadID: 456, From: User{ID: 1}, Text: "/help"})
+	if payload["chat_id"] != float64(-100123) || payload["message_thread_id"] != float64(456) {
+		t.Fatalf("help response was not routed to the command topic: %#v", payload)
+	}
+}
+
 func TestSampleTeamNamesResolve(t *testing.T) {
 	pairs := [][2]string{
 		{"Ланс", "Racing Club de Lens"}, {"Славия Прага", "SK Slavia Praha"},

@@ -62,14 +62,15 @@ type Chat struct {
 }
 
 type Message struct {
-	MessageID     int            `json:"message_id"`
-	Date          int64          `json:"date"`
-	Text          string         `json:"text"`
-	Caption       string         `json:"caption"`
-	From          User           `json:"from"`
-	Chat          Chat           `json:"chat"`
-	ForwardOrigin *MessageOrigin `json:"forward_origin"`
-	ReplyTo       *Message       `json:"reply_to_message"`
+	MessageID       int            `json:"message_id"`
+	MessageThreadID int            `json:"message_thread_id,omitempty"`
+	Date            int64          `json:"date"`
+	Text            string         `json:"text"`
+	Caption         string         `json:"caption"`
+	From            User           `json:"from"`
+	Chat            Chat           `json:"chat"`
+	ForwardOrigin   *MessageOrigin `json:"forward_origin"`
+	ReplyTo         *Message       `json:"reply_to_message"`
 }
 
 // MessageOrigin contains the Telegram fields needed to identify a forwarded
@@ -421,23 +422,30 @@ func (b *Bot) logText(text string) string {
 }
 
 func (b *Bot) send(chatID int64, text string) error {
-	return b.sendFormatted(chatID, text, "")
+	return b.sendTo(chatID, 0, text, "")
 }
 
 func (b *Bot) sendFormatted(chatID int64, text, parseMode string) error {
+	return b.sendTo(chatID, 0, text, parseMode)
+}
+
+func (b *Bot) sendTo(chatID int64, threadID int, text, parseMode string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	log.Printf("telegram output attempt: chat_id=%d text=%s", chatID, b.logText(text))
+	log.Printf("telegram output attempt: chat_id=%d thread_id=%d text=%s", chatID, threadID, b.logText(text))
 	params := map[string]any{"chat_id": chatID, "text": text}
+	if threadID != 0 {
+		params["message_thread_id"] = threadID
+	}
 	if parseMode != "" {
 		params["parse_mode"] = parseMode
 	}
 	err := b.call(ctx, "sendMessage", params, nil)
 	if err != nil {
-		log.Printf("telegram output failed: chat_id=%d error=%s", chatID, b.safeError(err))
+		log.Printf("telegram output failed: chat_id=%d thread_id=%d error=%s", chatID, threadID, b.safeError(err))
 		return err
 	}
-	log.Printf("telegram output sent: chat_id=%d", chatID)
+	log.Printf("telegram output sent: chat_id=%d thread_id=%d", chatID, threadID)
 	return nil
 }
 
@@ -483,11 +491,11 @@ func (b *Bot) handle(m Message) bool {
 		case "result":
 			b.handleResult(m, args)
 		case "help":
-			b.handleHelp(m.Chat.ID)
+			b.handleHelp(m)
 		case "debug":
-			b.handleDebug(m.Chat.ID)
+			b.handleDebug(m)
 		case "work":
-			_ = b.send(m.Chat.ID, "Команда переименована: используйте /result.")
+			_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Команда переименована: используйте /result.", "")
 		case "stats":
 			b.handleStats(m)
 		case "tour":
@@ -595,14 +603,14 @@ func (b *Bot) handleTour(m Message, args string) {
 	if args != "" && args != "data" {
 		round, stage, err := parseRoundSpecifier(args)
 		if err != nil {
-			_ = b.send(m.Chat.ID, "Формат: /tour [номер_тура|1/16|1/8|1/4|1/2|1/1] или /tour data.")
+			_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Формат: /tour [номер_тура|1/16|1/8|1/4|1/2|1/1] или /tour data.", "")
 			return
 		}
 		if b.footballDataToken == "" {
-			_ = b.send(m.Chat.ID, "Не настроен источник матчей. Добавьте FOOTBALL_DATA_TOKEN в .env и перезапустите бота.")
+			_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Не настроен источник матчей. Добавьте FOOTBALL_DATA_TOKEN в .env и перезапустите бота.", "")
 			return
 		}
-		go b.fetchAndSendTourFixtures(m.Chat.ID, round, stage)
+		go b.fetchAndSendTourFixtures(m.Chat.ID, m.MessageThreadID, round, stage)
 		return
 	}
 	b.mu.Lock()
@@ -636,13 +644,13 @@ func (b *Bot) handleTour(m Message, args string) {
 	}
 	b.mu.Unlock()
 	if len(fixtures) == 0 {
-		_ = b.send(m.Chat.ID, "Нет сохранённого списка матчей. Используйте /tour номер_тура.")
+		_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Нет сохранённого списка матчей. Используйте /tour номер_тура.", "")
 		return
 	}
-	b.publishFixtureList(m.Chat.ID, fixtures)
+	b.publishFixtureList(m.Chat.ID, m.MessageThreadID, fixtures)
 }
 
-func (b *Bot) fetchAndSendTourFixtures(chatID int64, matchday int, stage string) {
+func (b *Bot) fetchAndSendTourFixtures(chatID int64, threadID, matchday int, stage string) {
 	b.mu.Lock()
 	season := footballSeasonYear(time.Now().UTC())
 	var fixtures []publishedMatch
@@ -662,7 +670,7 @@ func (b *Bot) fetchAndSendTourFixtures(chatID int64, matchday int, stage string)
 	}
 	b.mu.Unlock()
 	if len(fixtures) > 0 {
-		b.publishFixtureList(chatID, fixtures)
+		b.publishFixtureList(chatID, threadID, fixtures)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -682,11 +690,11 @@ func (b *Bot) fetchAndSendTourFixtures(chatID int64, matchday int, stage string)
 	}
 	if err != nil {
 		log.Printf("fetch fixture list season %d matchday %d: %v", season, matchday, err)
-		_ = b.send(chatID, "Не удалось получить список матчей: "+err.Error())
+		_ = b.sendTo(chatID, threadID, "Не удалось получить список матчей: "+err.Error(), "")
 		return
 	}
 	if len(fixtures) == 0 {
-		_ = b.send(chatID, fmt.Sprintf("API не вернул матчи Лиги чемпионов для %s сезона %d/%d.", displayRound(matchday), season, season+1))
+		_ = b.sendTo(chatID, threadID, fmt.Sprintf("API не вернул матчи Лиги чемпионов для %s сезона %d/%d.", displayRound(matchday), season, season+1), "")
 		return
 	}
 	fetchedAt := time.Now().UTC()
@@ -701,14 +709,14 @@ func (b *Bot) fetchAndSendTourFixtures(chatID int64, matchday int, stage string)
 	if err := b.saveLocked(); err != nil {
 		b.mu.Unlock()
 		log.Printf("save fixture list results: %v", err)
-		_ = b.send(chatID, "Не удалось сохранить результаты тура: "+err.Error())
+		_ = b.sendTo(chatID, threadID, "Не удалось сохранить результаты тура: "+err.Error(), "")
 		return
 	}
 	b.mu.Unlock()
-	b.publishFixtureList(chatID, fixtures)
+	b.publishFixtureList(chatID, threadID, fixtures)
 }
 
-func (b *Bot) publishFixtureList(chatID int64, fixtures []publishedMatch) {
+func (b *Bot) publishFixtureList(chatID int64, threadID int, fixtures []publishedMatch) {
 	b.mu.Lock()
 	kept := b.data.Lists[:0]
 	for _, old := range b.data.Lists {
@@ -721,16 +729,16 @@ func (b *Bot) publishFixtureList(chatID int64, fixtures []publishedMatch) {
 	b.mu.Unlock()
 	if err != nil {
 		log.Printf("save fixture list: %v", err)
-		_ = b.send(chatID, "Не удалось сохранить список матчей: "+err.Error())
+		_ = b.sendTo(chatID, threadID, "Не удалось сохранить список матчей: "+err.Error(), "")
 		return
 	}
-	b.sendLong(chatID, formatForecastTemplate(fixtures))
+	b.sendLongTo(chatID, threadID, formatForecastTemplate(fixtures))
 }
 
 func (b *Bot) handleResult(m Message, args string) {
 	opts, err := parseResultOptions(args)
 	if err != nil {
-		_ = b.send(m.Chat.ID, "Ошибка: "+err.Error())
+		_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Ошибка: "+err.Error(), "")
 		return
 	}
 	b.mu.Lock()
@@ -747,7 +755,7 @@ func (b *Bot) handleResult(m Message, args string) {
 	}
 	if !userExists || len(forecasts) == 0 {
 		b.mu.Unlock()
-		_ = b.send(m.Chat.ID, "Не нашёл прогнозов для этого тура и пользователя.")
+		_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Не нашёл прогнозов для этого тура и пользователя.", "")
 		return
 	}
 	if opts.dataOnly {
@@ -772,7 +780,7 @@ func (b *Bot) handleResult(m Message, args string) {
 		scores, pending := preview.scoreRoundsLocked(m.Chat.ID, forecasts, fixtures)
 		snapshots := append([]SeasonSnapshot(nil), b.data.Seasons...)
 		b.mu.Unlock()
-		b.sendRoundResultReport(m.Chat.ID, scores, snapshots, fixtures, pending, opts)
+		b.sendRoundResultReport(m.Chat.ID, m.MessageThreadID, scores, snapshots, fixtures, pending, opts)
 		return
 	}
 	if b.resultRunning == nil {
@@ -780,13 +788,13 @@ func (b *Bot) handleResult(m Message, args string) {
 	}
 	if b.resultRunning[m.Chat.ID] {
 		b.mu.Unlock()
-		_ = b.send(m.Chat.ID, "Обновление результатов для этого чата уже выполняется.")
+		_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Обновление результатов для этого чата уже выполняется.", "")
 		return
 	}
 	b.resultRunning[m.Chat.ID] = true
 	b.mu.Unlock()
-	_ = b.send(m.Chat.ID, "Обновляю счета Лиги чемпионов и считаю очки по турам…")
-	go b.fetchAndScoreRounds(m.Chat.ID, forecasts, opts)
+	_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Обновляю счета Лиги чемпионов и считаю очки по турам…", "")
+	go b.fetchAndScoreRoundsTo(m.Chat.ID, m.MessageThreadID, forecasts, opts)
 }
 
 type resultOptions struct {
@@ -1022,7 +1030,7 @@ func updateSeasonMatchday(data *Store, chatID int64, season, currentMatchday int
 	data.Seasons = append(data.Seasons, SeasonSnapshot{ChatID: chatID, Season: season, CurrentMatchday: currentMatchday, FetchedAt: fetchedAt})
 }
 
-func (b *Bot) fetchAndScoreMatchday(chatID int64, forecasts []Forecast, opts resultOptions) {
+func (b *Bot) fetchAndScoreMatchday(chatID int64, threadID int, forecasts []Forecast, opts resultOptions) {
 	type seasonCache struct {
 		fixtures        []publishedMatch
 		available       bool
@@ -1030,7 +1038,7 @@ func (b *Bot) fetchAndScoreMatchday(chatID int64, forecasts []Forecast, opts res
 		currentMatchday int
 	}
 	if opts.refresh && b.footballDataToken == "" {
-		_ = b.send(chatID, "Для принудительного обновления нужен FOOTBALL_DATA_TOKEN.")
+		_ = b.sendTo(chatID, threadID, "Для принудительного обновления нужен FOOTBALL_DATA_TOKEN.", "")
 		return
 	}
 
@@ -1109,7 +1117,7 @@ func (b *Bot) fetchAndScoreMatchday(chatID int64, forecasts []Forecast, opts res
 		if opts.refresh || !cache.complete {
 			if b.footballDataToken == "" {
 				if !cache.available {
-					_ = b.send(chatID, "Нет сохранённых результатов этого тура. Добавьте FOOTBALL_DATA_TOKEN для запроса к football-data.org.")
+					_ = b.sendTo(chatID, threadID, "Нет сохранённых результатов этого тура. Добавьте FOOTBALL_DATA_TOKEN для запроса к football-data.org.", "")
 					return
 				}
 			} else {
@@ -1132,12 +1140,12 @@ func (b *Bot) fetchAndScoreMatchday(chatID int64, forecasts []Forecast, opts res
 				if err != nil {
 					log.Printf("fetch Champions League season %d matchday %d: %s", season, opts.matchday, b.safeError(err))
 					if !cache.available || opts.refresh {
-						_ = b.send(chatID, fmt.Sprintf("Не удалось получить %s сезона %d/%d: %s", displayRound(opts.matchday), season, season+1, b.safeError(err)))
+						_ = b.sendTo(chatID, threadID, fmt.Sprintf("Не удалось получить %s сезона %d/%d: %s", displayRound(opts.matchday), season, season+1, b.safeError(err)), "")
 						return
 					}
 				} else if len(matches) == 0 {
 					if opts.refresh {
-						_ = b.send(chatID, fmt.Sprintf("API не вернул матчи для %s сезона %d/%d; сохранённые данные не изменены.", displayRound(opts.matchday), season, season+1))
+						_ = b.sendTo(chatID, threadID, fmt.Sprintf("API не вернул матчи для %s сезона %d/%d; сохранённые данные не изменены.", displayRound(opts.matchday), season, season+1), "")
 						return
 					}
 					if !cache.available {
@@ -1210,29 +1218,29 @@ func (b *Bot) fetchAndScoreMatchday(chatID int64, forecasts []Forecast, opts res
 			if err := b.saveLocked(); err != nil {
 				b.mu.Unlock()
 				log.Printf("save no-forecast round scores: %v", err)
-				_ = b.send(chatID, "Не удалось сохранить результаты тура: "+err.Error())
+				_ = b.sendTo(chatID, threadID, "Не удалось сохранить результаты тура: "+err.Error(), "")
 				return
 			}
 			scores := append([]RoundScore(nil), b.data.RoundScores...)
 			snapshots = append([]SeasonSnapshot(nil), b.data.Seasons...)
 			b.mu.Unlock()
-			b.sendRoundResultReport(chatID, scores, snapshots, allFixtures, nil, opts)
+			b.sendRoundResultReport(chatID, threadID, scores, snapshots, allFixtures, nil, opts)
 			return
 		}
 		if len(fetchedSets) > 0 || len(metadata) > 0 {
 			if err := b.saveLocked(); err != nil {
 				b.mu.Unlock()
 				log.Printf("save matchday results: %v", err)
-				_ = b.send(chatID, "Не удалось сохранить результаты тура: "+err.Error())
+				_ = b.sendTo(chatID, threadID, "Не удалось сохранить результаты тура: "+err.Error(), "")
 				return
 			}
 		}
 		b.mu.Unlock()
 		if !roundFound {
-			_ = b.send(chatID, fmt.Sprintf("football-data.org не вернул матчи для %s в сохранённых сезонах.", displayRound(opts.matchday)))
+			_ = b.sendTo(chatID, threadID, fmt.Sprintf("football-data.org не вернул матчи для %s в сохранённых сезонах.", displayRound(opts.matchday)), "")
 			return
 		}
-		_ = b.send(chatID, fmt.Sprintf("Не нашёл прогнозов на %s%s.", displayRound(opts.matchday), resultUsernameSuffix(opts.username, forecasts)))
+		_ = b.sendTo(chatID, threadID, fmt.Sprintf("Не нашёл прогнозов на %s%s.", displayRound(opts.matchday), resultUsernameSuffix(opts.username, forecasts)), "")
 		return
 	}
 	_, pending := b.scoreRoundsLocked(chatID, selectedForecasts, allFixtures)
@@ -1240,13 +1248,13 @@ func (b *Bot) fetchAndScoreMatchday(chatID int64, forecasts []Forecast, opts res
 	if err := b.saveLocked(); err != nil {
 		b.mu.Unlock()
 		log.Printf("save matchday scores: %v", err)
-		_ = b.send(chatID, "Не удалось сохранить результаты тура: "+err.Error())
+		_ = b.sendTo(chatID, threadID, "Не удалось сохранить результаты тура: "+err.Error(), "")
 		return
 	}
 	scores := append([]RoundScore(nil), b.data.RoundScores...)
 	snapshots = append([]SeasonSnapshot(nil), b.data.Seasons...)
 	b.mu.Unlock()
-	b.sendRoundResultReport(chatID, scores, snapshots, allFixtures, pending, opts)
+	b.sendRoundResultReport(chatID, threadID, scores, snapshots, allFixtures, pending, opts)
 }
 
 func (b *Bot) removeRoundScoresLocked(chatID int64, matchday int, seasons map[int]bool) {
@@ -1284,13 +1292,17 @@ func resultUsernameSuffix(username string, forecasts []Forecast) string {
 }
 
 func (b *Bot) fetchAndScoreRounds(chatID int64, forecasts []Forecast, opts resultOptions) {
+	b.fetchAndScoreRoundsTo(chatID, 0, forecasts, opts)
+}
+
+func (b *Bot) fetchAndScoreRoundsTo(chatID int64, threadID int, forecasts []Forecast, opts resultOptions) {
 	defer func() {
 		b.mu.Lock()
 		delete(b.resultRunning, chatID)
 		b.mu.Unlock()
 	}()
 	if opts.matchday > 0 {
-		b.fetchAndScoreMatchday(chatID, forecasts, opts)
+		b.fetchAndScoreMatchday(chatID, threadID, forecasts, opts)
 		return
 	}
 	seasonsSet := map[int]bool{}
@@ -1355,7 +1367,7 @@ func (b *Bot) fetchAndScoreRounds(chatID int64, forecasts []Forecast, opts resul
 			}
 		}
 		if b.footballDataToken == "" {
-			_ = b.send(chatID, "Нет сохранённых финальных результатов для всех прогнозов. Добавьте FOOTBALL_DATA_TOKEN для обновления.")
+			_ = b.sendTo(chatID, threadID, "Нет сохранённых финальных результатов для всех прогнозов. Добавьте FOOTBALL_DATA_TOKEN для обновления.", "")
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -1371,13 +1383,13 @@ func (b *Bot) fetchAndScoreRounds(chatID int64, forecasts []Forecast, opts resul
 				}
 			}
 			if len(matches) == 0 {
-				_ = b.send(chatID, fmt.Sprintf("Не удалось получить результаты сезона %d/%d: %s", season, season+1, err.Error()))
+				_ = b.sendTo(chatID, threadID, fmt.Sprintf("Не удалось получить результаты сезона %d/%d: %s", season, season+1, err.Error()), "")
 				return
 			}
 			continue
 		}
 		if len(matches) == 0 {
-			_ = b.send(chatID, fmt.Sprintf("API не вернул матчи Лиги чемпионов за сезон %d/%d.", season, season+1))
+			_ = b.sendTo(chatID, threadID, fmt.Sprintf("API не вернул матчи Лиги чемпионов за сезон %d/%d.", season, season+1), "")
 			return
 		}
 		newSnapshots = append(newSnapshots, SeasonSnapshot{ChatID: chatID, Season: season, FetchedAt: time.Now().UTC(), CurrentMatchday: currentMatchday, Matches: matches})
@@ -1388,7 +1400,7 @@ func (b *Bot) fetchAndScoreRounds(chatID int64, forecasts []Forecast, opts resul
 	}
 	fixtures = append(fixtures, cachedRoundFixtures...)
 	if len(fixtures) == 0 {
-		_ = b.send(chatID, "Не удалось загрузить матчи для расчёта.")
+		_ = b.sendTo(chatID, threadID, "Не удалось загрузить матчи для расчёта.", "")
 		return
 	}
 	b.mu.Lock()
@@ -1427,13 +1439,13 @@ func (b *Bot) fetchAndScoreRounds(chatID int64, forecasts []Forecast, opts resul
 	if err := b.saveLocked(); err != nil {
 		b.mu.Unlock()
 		log.Printf("save round results: %v", err)
-		_ = b.send(chatID, "Не удалось сохранить результаты: "+err.Error())
+		_ = b.sendTo(chatID, threadID, "Не удалось сохранить результаты: "+err.Error(), "")
 		return
 	}
 	allScores := append([]RoundScore(nil), b.data.RoundScores...)
 	allSnapshots := append([]SeasonSnapshot(nil), b.data.Seasons...)
 	b.mu.Unlock()
-	b.sendRoundResultReport(chatID, allScores, allSnapshots, fixtures, pending, opts)
+	b.sendRoundResultReport(chatID, threadID, allScores, allSnapshots, fixtures, pending, opts)
 }
 
 func (b *Bot) scoreRoundsLocked(chatID int64, forecasts []Forecast, fixtures []publishedMatch) ([]RoundScore, []ForecastDetail) {
@@ -1678,7 +1690,7 @@ func shortReason(reason string) string {
 	return reason
 }
 
-func (b *Bot) sendRoundResultReport(chatID int64, scores []RoundScore, snapshots []SeasonSnapshot, fixtures []publishedMatch, pending []ForecastDetail, opts resultOptions) {
+func (b *Bot) sendRoundResultReport(chatID int64, threadID int, scores []RoundScore, snapshots []SeasonSnapshot, fixtures []publishedMatch, pending []ForecastDetail, opts resultOptions) {
 	type roundView struct {
 		season   int
 		matchday int
@@ -1730,7 +1742,7 @@ func (b *Bot) sendRoundResultReport(chatID int64, scores []RoundScore, snapshots
 		return a.matchday < c.matchday
 	})
 	if len(keys) == 0 {
-		_ = b.send(chatID, "Нет завершённых туров для отображения.")
+		_ = b.sendTo(chatID, threadID, "Нет завершённых туров для отображения.", "")
 		return
 	}
 	var out strings.Builder
@@ -1867,15 +1879,19 @@ func (b *Bot) sendRoundResultReport(chatID int64, scores []RoundScore, snapshots
 	if opts.username == "" && currentSeason > 0 && currentMatchday > 0 {
 		fmt.Fprintf(&out, "\nСейчас идёт тур %d сезона %d/%d.", currentMatchday, currentSeason, currentSeason+1)
 	}
-	b.sendLong(chatID, strings.TrimSpace(out.String()))
+	b.sendLongTo(chatID, threadID, strings.TrimSpace(out.String()))
 }
 
 func (b *Bot) sendLong(chatID int64, text string) {
+	b.sendLongTo(chatID, 0, text)
+}
+
+func (b *Bot) sendLongTo(chatID int64, threadID int, text string) {
 	const maxChars = 3500
 	var chunk strings.Builder
 	for _, line := range strings.Split(text, "\n") {
 		if chunk.Len() > 0 && chunk.Len()+len(line)+1 > maxChars {
-			if err := b.send(chatID, chunk.String()); err != nil {
+			if err := b.sendTo(chatID, threadID, chunk.String(), ""); err != nil {
 				log.Printf("send report: %s", b.safeError(err))
 			}
 			chunk.Reset()
@@ -1886,7 +1902,7 @@ func (b *Bot) sendLong(chatID int64, text string) {
 		chunk.WriteString(line)
 	}
 	if chunk.Len() > 0 {
-		if err := b.send(chatID, chunk.String()); err != nil {
+		if err := b.sendTo(chatID, threadID, chunk.String(), ""); err != nil {
 			log.Printf("send report: %s", b.safeError(err))
 		}
 	}
@@ -1930,7 +1946,7 @@ func (b *Bot) handleStats(m Message) {
 	}
 	b.mu.Unlock()
 	if len(rows) == 0 {
-		_ = b.send(m.Chat.ID, "Статистика пока пустая. Сначала соберите прогнозы и выполните /result.")
+		_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Статистика пока пустая. Сначала соберите прогнозы и выполните /result.", "")
 		return
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -2000,11 +2016,11 @@ func (b *Bot) handleStats(m Message) {
 	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "Таблица Лиги чемпионов · сезон %d/%d\n<pre>%s</pre>\nИгроки отсортированы по общему числу очков. В колонке «Очки/точно» второй показатель — число точных счетов. · — тур ещё не оценён.", statsSeason, statsSeason+1, html.EscapeString(strings.TrimRight(table.String(), "\n")))
-	_ = b.sendFormatted(m.Chat.ID, strings.TrimSpace(out.String()), "HTML")
+	_ = b.sendTo(m.Chat.ID, m.MessageThreadID, strings.TrimSpace(out.String()), "HTML")
 }
 
-func (b *Bot) handleHelp(chatID int64) {
-	_ = b.send(chatID, "Команды бота:\n"+
+func (b *Bot) handleHelp(m Message) {
+	_ = b.sendTo(m.Chat.ID, m.MessageThreadID, "Команды бота:\n"+
 		"/help — эта справка\n"+
 		"/tour [номер_тура|1/16|1/8|1/4|1/2|1/1] — список матчей и шаблон прогнозов\n"+
 		"/tour data — последний сохранённый список матчей\n"+
@@ -2013,10 +2029,10 @@ func (b *Bot) handleHelp(chatID int64) {
 		"/stats — общие очки, точные счета и баллы по турам\n"+
 		"/debug — время работы бота и последние логи\n\n"+
 		"Прогноз отправляйте строками, например: 1. Ланс — Спортинг: 1:1\n"+
-		"Чтобы учесть старый прогноз, ответьте на его сообщение любым текстом.")
+		"Чтобы учесть старый прогноз, ответьте на его сообщение любым текстом.", "")
 }
 
-func (b *Bot) handleDebug(chatID int64) {
+func (b *Bot) handleDebug(m Message) {
 	startedAt := b.startedAt
 	if startedAt.IsZero() {
 		startedAt = time.Now()
@@ -2053,7 +2069,7 @@ func (b *Bot) handleDebug(chatID int64) {
 			}
 		}
 	}
-	b.sendLong(chatID, strings.TrimSpace(out.String()))
+	b.sendLongTo(m.Chat.ID, m.MessageThreadID, strings.TrimSpace(out.String()))
 }
 
 func formatUptime(uptime time.Duration) string {
