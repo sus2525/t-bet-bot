@@ -6,11 +6,11 @@ COPY *.go ./
 RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/football-bot .
 
 FROM alpine:3.20
-RUN apk add --no-cache sqlite-libs
+RUN apk add --no-cache sqlite-libs su-exec
 RUN addgroup -S bot && adduser -S bot -G bot
 WORKDIR /app
 COPY --from=build /out/football-bot /usr/local/bin/football-bot
-RUN mkdir -p /data && chown bot:bot /data
-USER bot
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN mkdir -p /data && chown bot:bot /data && chmod 0755 /usr/local/bin/docker-entrypoint.sh
 ENV DATA_FILE=/data/bot.db
-ENTRYPOINT ["/usr/local/bin/football-bot"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
